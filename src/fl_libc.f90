@@ -42,6 +42,16 @@ module fl_libc
     integer(c_long) :: nsec = 0
   end type
 
+  type, bind(c) :: winsize_t
+    integer(c_short) :: row = 0
+    integer(c_short) :: col = 0
+    integer(c_short) :: xpixel = 0
+    integer(c_short) :: ypixel = 0
+  end type
+
+  ! set by signal handler; polled by the main loop
+  integer, volatile :: quit_flag = 0
+
   interface
     integer(c_int) function c_socket(dom, typ, proto) bind(c, name='socket')
       import :: c_int
@@ -116,6 +126,51 @@ module fl_libc
       import :: c_int, timespec_t
       integer(c_int), value :: clk
       type(timespec_t), intent(out) :: ts
+    end function
+
+    integer(c_long) function c_sendmsg(fd, msg, flags) bind(c, name='sendmsg')
+      import :: c_int, c_long, msghdr_t
+      integer(c_int), value :: fd
+      type(msghdr_t), intent(inout) :: msg
+      integer(c_int), value :: flags
+    end function
+
+    integer(c_long) function c_write(fd, buf, n) bind(c, name='write')
+      import :: c_int, c_long, c_ptr, c_size_t
+      integer(c_int), value :: fd
+      type(c_ptr), value :: buf
+      integer(c_size_t), value :: n
+    end function
+
+    integer(c_long) function c_read(fd, buf, n) bind(c, name='read')
+      import :: c_int, c_long, c_ptr, c_size_t
+      integer(c_int), value :: fd
+      type(c_ptr), value :: buf
+      integer(c_size_t), value :: n
+    end function
+
+    integer(c_int) function c_isatty(fd) bind(c, name='isatty')
+      import :: c_int
+      integer(c_int), value :: fd
+    end function
+
+    integer(c_int) function c_ioctl_ws(fd, req, ws) bind(c, name='ioctl')
+      import :: c_int, c_long, winsize_t
+      integer(c_int), value :: fd
+      integer(c_long), value :: req
+      type(winsize_t), intent(out) :: ws
+    end function
+
+    integer(c_int) function c_memfd_create(name, flags) bind(c, name='memfd_create')
+      import :: c_int, c_char
+      character(kind=c_char), intent(in) :: name(*)
+      integer(c_int), value :: flags
+    end function
+
+    type(c_funptr) function c_signal(sig, handler) bind(c, name='signal')
+      import :: c_int, c_funptr
+      integer(c_int), value :: sig
+      type(c_funptr), value :: handler
     end function
   end interface
 
@@ -233,5 +288,73 @@ contains
       done = done + int(w)
     end do
   end function
+
+  ! Send exactly n bytes with one file descriptor attached via SCM_RIGHTS.
+  function send_with_fd(fd, p, n, passfd) result(ok)
+    integer(c_int), intent(in) :: fd, passfd
+    type(c_ptr), intent(in) :: p
+    integer, intent(in) :: n
+    logical :: ok
+    type(msghdr_t) :: mh
+    type(iovec_t), target :: iov
+    integer(c_int8_t), target :: cbuf(24)
+    integer(c_int8_t), pointer :: bytes(:)
+    integer(c_int8_t), allocatable, target :: tmp(:)
+    integer(8) :: w
+
+    call c_f_pointer(p, bytes, [n])
+    allocate(tmp(n))
+    tmp = bytes(1:n)
+
+    cbuf = 0_1
+    cbuf(1:8)   = transfer(20_8, cbuf(1:8))                ! cmsg_len
+    cbuf(9:12)  = transfer(SOL_SOCKET, cbuf(9:12))
+    cbuf(13:16) = transfer(SCM_RIGHTS, cbuf(13:16))
+    cbuf(17:20) = transfer(passfd, cbuf(17:20))
+
+    iov%base = c_loc(tmp(1))
+    iov%len = int(n, c_size_t)
+    mh%name = c_null_ptr; mh%namelen = 0
+    mh%iov = c_loc(iov);  mh%iovlen = 1
+    mh%control = c_loc(cbuf)
+    mh%controllen = 24
+    mh%flags = 0
+    w = c_sendmsg(fd, mh, MSG_NOSIGNAL)
+    ok = (w == int(n, 8))
+  end function
+
+  ! Create a sealed-nothing memfd holding the given text; returns the fd.
+  function memfd_from_text(name, text) result(fd)
+    character(*), intent(in) :: name, text
+    integer(c_int) :: fd
+    character(kind=c_char) :: cname(len_trim(name)+1)
+    integer(c_int8_t), allocatable, target :: raw(:)
+    integer :: i, n
+    integer(8) :: w
+    do i = 1, len_trim(name)
+      cname(i) = name(i:i)
+    end do
+    cname(len_trim(name)+1) = c_null_char
+    fd = c_memfd_create(cname, 1_c_int)   ! MFD_CLOEXEC
+    if (fd < 0) return
+    n = len(text) + 1
+    allocate(raw(n))
+    do i = 1, n - 1
+      raw(i) = int(iachar(text(i:i)), 1)
+    end do
+    raw(n) = 0_1
+    w = c_write(fd, c_loc(raw(1)), int(n, c_size_t))
+  end function
+
+  subroutine sig_handler(sig) bind(c)
+    integer(c_int), value :: sig
+    quit_flag = int(sig)
+  end subroutine
+
+  subroutine install_signal_handlers()
+    type(c_funptr) :: old
+    old = c_signal(2_c_int, c_funloc(sig_handler))    ! SIGINT
+    old = c_signal(15_c_int, c_funloc(sig_handler))   ! SIGTERM
+  end subroutine
 
 end module fl_libc
