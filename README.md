@@ -58,9 +58,10 @@ connector, set a mode, scan out via a dumb buffer, keyboard from the VT.
 Safety: DRM master is exclusive at the kernel level, so it can never steal
 a display another compositor owns, and the auto-scan only accepts *virtual*
 connectors (vkms); driving real hardware requires an explicit
-`FABLAND_DRM_CARD=/dev/dri/cardN`. To try it for real: switch to a spare VT,
-log in, and run it there — your session compositor releases master while
-VT-switched away. F10 gives the display back.
+`FABLAND_DRM_CARD=/dev/dri/cardN`. To try it for real: switch to a spare VT
+(Ctrl-Alt-F3), log in, and run **`./metal`** — it takes the panel, drops a
+terminal onto the desktop, and F10 gives the display back (your session
+compositor releases master while VT-switched away).
 
 **headless** (`FABLAND_BACKEND=headless`): PNG frames only, written by a
 from-scratch PNG encoder (CRC-32, Adler-32, stored-deflate — also Fortran).
