@@ -21,6 +21,7 @@ module fl_core
   use fl_png
   use fl_xkb
   use fl_term
+  use fl_input
   implicit none
 
   integer :: OUTW = 1024, OUTH = 640   ! desktop size; drm backend resizes to the mode
@@ -111,6 +112,7 @@ module fl_core
   logical :: needs_paint = .true.
   logical :: debug = .false.
   logical :: term_mode = .false.
+  logical :: drmmode = .false.
   integer :: logu = 6
   integer(4), allocatable :: canvas(:,:)
 
@@ -121,6 +123,7 @@ module fl_core
   integer :: kfocus = 0            ! keyboard-focused surface index
   integer :: pfocus = 0            ! pointer-focused surface index
   integer :: drag_si = 0, drag_dx = 0, drag_dy = 0
+  integer :: btns_down = 0         ! pressed pointer buttons (validates move grabs)
   integer :: ptr_x = 512, ptr_y = 320   ! re-centered once OUTW/OUTH are final
   integer :: host_mods = 0         ! nested backend: host modifier state
   integer(c_int) :: keymap_fd = -1
@@ -654,6 +657,7 @@ contains
       if (surfs(drag_si)%used) then
         surfs(drag_si)%x = px - drag_dx
         surfs(drag_si)%y = max(32, py - drag_dy)
+        policy_dirty = .true.
       end if
       return
     end if
@@ -675,6 +679,7 @@ contains
     integer, intent(in) :: btn
     logical, intent(in) :: ctrl_held
     integer :: si, code
+    btns_down = btns_down + 1
     si = hit_frame(ptr_x, ptr_y)
     if (si == 0) return
     call zraise(si)
@@ -713,6 +718,7 @@ contains
   subroutine pointer_release(btn)
     integer, intent(in) :: btn
     integer :: code
+    btns_down = max(0, btns_down - 1)
     if (drag_si > 0 .and. btn == 0) then
       drag_si = 0
       return
@@ -1168,6 +1174,13 @@ contains
         p = ap
         call rstr(ci, p, str)
         call logmsg('app id: "'//trim(str)//'"')
+      case (5)   ! move(seat, serial): client-initiated interactive drag —
+                 ! only honored while a button is actually held
+        if (si > 0 .and. btns_down > 0) then
+          drag_si = si
+          drag_dx = ptr_x - surfs(si)%x
+          drag_dy = ptr_y - surfs(si)%y
+        end if
       case default
       end select
 
@@ -1480,7 +1493,7 @@ contains
         end if
       end do
     end do
-    if (term_mode) call draw_cursor()
+    if (term_mode .or. (drmmode .and. inp_count() > 0)) call draw_cursor()
   end subroutine
 
   subroutine fire_frame_callbacks(tms)
@@ -1653,6 +1666,7 @@ program fabland
   use fl_term
   use fl_nest
   use fl_drm
+  use fl_input
   use fl_core
   implicit none
 
@@ -1660,13 +1674,14 @@ program fabland
   character(200) :: status
   integer :: st, i, ci, nfds, shot_every, frame_no, shot_no, stdin_slot, nest_slot
   integer(c_int) :: lfd, cfd
-  type(pollfd_t) :: pfds(12)
-  integer :: pmap(12)
+  type(pollfd_t) :: pfds(24)
+  integer :: pmap(24)
+  integer :: inp_lo, inp_hi
   integer(8) :: n, last_paint, last_term, tnow
   character(64) :: shotname
   type(tev) :: evq(128)
   integer :: nev, nwin, zi
-  logical :: nested, pending_present, sock_ok, drmmode, raw_stdin
+  logical :: nested, pending_present, sock_ok, raw_stdin
 
   call get_environment_variable('XDG_RUNTIME_DIR', rtdir, status=st)
   if (st /= 0) rtdir = '/tmp'
@@ -1745,6 +1760,17 @@ program fabland
         open(newunit=logu, file='fabland.log', status='replace', action='write')
         call term_init_input()
       end if
+      call get_environment_variable('FABLAND_INPUT_DEV', envbuf, status=st)
+      if (st /= 0) envbuf = ' '
+      call inp_open_all(trim(envbuf))
+      if (inp_count() > 0) then
+        do i = 1, inp_count()
+          call logmsg('input: '//trim(inp_describe(i)))
+        end do
+      else
+        call logmsg('input: no pointer devices readable'// &
+                    ' (join the input group: sudo usermod -aG input $USER)')
+      end if
     else
       drmmode = .false.
       call logmsg('drm: no usable card (need a free master + virtual connector,'// &
@@ -1816,6 +1842,16 @@ program fabland
       pmap(nfds) = 0
       nest_slot = nfds
     end if
+    inp_lo = 0; inp_hi = -1
+    do i = 1, inp_count()
+      nfds = nfds + 1
+      pfds(nfds)%fd = inp_fd(i)
+      pfds(nfds)%events = POLLIN
+      pfds(nfds)%revents = 0
+      pmap(nfds) = 0
+      if (inp_lo == 0) inp_lo = nfds
+      inp_hi = nfds
+    end do
     do i = 1, size(clients)
       if (clients(i)%used) then
         nfds = nfds + 1
@@ -1862,6 +1898,10 @@ program fabland
         call nest_pump(evq, nev)
       end if
     end if
+    do i = 1, inp_hi - inp_lo + 1
+      if (iand(int(pfds(inp_lo + i - 1)%revents), int(POLLIN)) /= 0) &
+        call inp_read(i, ptr_x, ptr_y, OUTW, OUTH, evq, nev)
+    end do
     if (nev > 0) call handle_events(evq, nev)
     call pol_read_commands()
 

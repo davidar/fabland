@@ -28,7 +28,7 @@ Fortran via `ISO_C_BINDING`.
 | `wl_output` | geometry, modes, scale |
 | `wl_subcompositor` | subsurfaces composited onto their parent (foot's CSD uses these) |
 | `wl_data_device_manager` | stubbed enough for toolkit clients |
-| `xdg_wm_base` / `xdg_surface` / `xdg_toplevel` | configure/ack lifecycle, titles, close |
+| `xdg_wm_base` / `xdg_surface` / `xdg_toplevel` | configure/ack lifecycle, titles, close, interactive `move` |
 
 Window management: stacking order, click-to-focus/raise, focus-follows-map,
 titlebar drag to move (ctrl+drag anywhere), close button, server-side
@@ -57,7 +57,12 @@ raw DRM/KMS ioctls (no libdrm): become DRM master, pick a connected
 connector, set a mode, scan out via a dumb buffer, keyboard from the VT.
 The desktop is sized to the mode, at an auto-picked integer scale so HiDPI
 panels stay readable (2880×1800 becomes a 1440×900 desktop rendered 2× —
-override with `FABLAND_SCALE=n`).
+override with `FABLAND_SCALE=n`). It also has a pointer: mice and touchpads
+read straight from `/dev/input/event*` — `EVIOCGBIT` classification, relative
+and absolute motion, wheel, tap-to-click — no libinput, a mouse is just a
+stream of 24-byte records if you ask nicely. One-time setup:
+`sudo usermod -aG input $USER` (log out/in). Windows drag by their titlebars,
+server- or client-side.
 Safety: DRM master is exclusive at the kernel level, so it can never steal
 a display another compositor owns, and the auto-scan only accepts *virtual*
 connectors (vkms); driving real hardware requires an explicit

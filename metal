@@ -24,6 +24,11 @@ if [ ! -x ./fabland ]; then
   exit 1
 fi
 
+if ! id -nG | grep -qw input; then
+  echo "metal: note — you're not in the 'input' group, so the mouse/touchpad" >&2
+  echo "metal: won't work. One-time fix: sudo usermod -aG input $USER (re-login)." >&2
+fi
+
 # Once the compositor is up, put a terminal on the desktop so there's
 # something to type into. Clients live in the fabland-test distrobox.
 (
