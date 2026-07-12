@@ -1652,6 +1652,7 @@ program fabland
   use fl_xkb
   use fl_term
   use fl_nest
+  use fl_drm
   use fl_core
   implicit none
 
@@ -1665,7 +1666,7 @@ program fabland
   character(64) :: shotname
   type(tev) :: evq(128)
   integer :: nev, nwin, zi
-  logical :: nested, pending_present, sock_ok
+  logical :: nested, pending_present, sock_ok, drmmode, raw_stdin
 
   call get_environment_variable('XDG_RUNTIME_DIR', rtdir, status=st)
   if (st /= 0) rtdir = '/tmp'
@@ -1685,10 +1686,12 @@ program fabland
   end if
   nested = .false.
   term_mode = .false.
+  drmmode = .false.
   call get_environment_variable('FABLAND_BACKEND', envbuf, status=st)
   if (st == 0 .and. len_trim(envbuf) > 0) then
     nested = (trim(envbuf) == 'nested')
     term_mode = (trim(envbuf) == 'term')
+    drmmode = (trim(envbuf) == 'drm')
   else if (sock_ok) then
     nested = .true.
   else
@@ -1716,10 +1719,27 @@ program fabland
     stop 1
   end if
 
+  raw_stdin = .false.
   if (term_mode) then
     open(newunit=logu, file='fabland.log', status='replace', action='write')
     call term_init()
     call term_probe(OUTW, OUTH)
+  end if
+  if (drmmode) then
+    call get_environment_variable('FABLAND_DRM_CARD', envbuf, status=st)
+    if (st /= 0) envbuf = ' '
+    if (drm_open_any(trim(envbuf))) then
+      call logmsg('drm: master on '//trim(drm_describe()))
+      if (c_isatty(0_c_int) == 1) then
+        raw_stdin = .true.
+        open(newunit=logu, file='fabland.log', status='replace', action='write')
+        call term_init_input()
+      end if
+    else
+      drmmode = .false.
+      call logmsg('drm: no usable card (need a free master + virtual connector,'// &
+                  ' or set FABLAND_DRM_CARD), falling back to headless')
+    end if
   end if
   if (nested) then
     if (.not. nest_connect(trim(rtdir), trim(host_disp), &
@@ -1739,6 +1759,9 @@ program fabland
     call logmsg('backend: nested (window on host '//trim(host_disp)//')')
   else if (term_mode) then
     call logmsg('backend: terminal (half-block truecolor)')
+  else if (drmmode) then
+    call logmsg('backend: drm/kms ('//trim(itoa(drm_mode_w))//'x'// &
+                trim(itoa(drm_mode_h))//' scanout)')
   else
     call logmsg('backend: headless (PNG frames in ./shots)')
   end if
@@ -1761,7 +1784,7 @@ program fabland
     pmap(1) = 0
     stdin_slot = 0
     nest_slot = 0
-    if (term_mode) then
+    if (term_mode .or. raw_stdin) then
       nfds = 2
       pfds(2)%fd = 0
       pfds(2)%events = POLLIN
@@ -1862,6 +1885,7 @@ program fabland
       end if
       frame_no = frame_no + 1
       if (nested) pending_present = .true.
+      if (drmmode) call drm_present(canvas, OUTW, OUTH)
     end if
 
     if (nested .and. pending_present .and. nest_can_present()) then
@@ -1891,6 +1915,7 @@ program fabland
 
   ! ── shutdown ──
   if (term_mode) call term_shutdown()
+  if (raw_stdin) call term_shutdown_input()
   do i = 1, size(clients)
     if (clients(i)%used) call disconnect(i)
   end do

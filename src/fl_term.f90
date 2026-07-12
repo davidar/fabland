@@ -7,7 +7,7 @@ module fl_term
   implicit none
   private
   public :: tev, term_init, term_shutdown, term_probe, term_render, &
-            term_read_input, term_tick, &
+            term_read_input, term_tick, term_init_input, term_shutdown_input, &
             TK_CHAR, TK_SPECIAL, TK_MOTION, TK_PRESS, TK_RELEASE, TK_WHEEL, &
             TK_RAWKEY, TK_RAWMODS, TK_QUIT
 
@@ -56,6 +56,15 @@ contains
     call execute_command_line('stty raw -echo 2>/dev/null')
     call tput(achar(27)//'[?1049h'//achar(27)//'[?25l'// &
               achar(27)//'[?1003h'//achar(27)//'[?1006h'//achar(27)//'[2J')
+  end subroutine
+
+  ! raw keyboard only — for the DRM backend running on a VT
+  subroutine term_init_input()
+    call execute_command_line('stty raw -echo 2>/dev/null')
+  end subroutine
+
+  subroutine term_shutdown_input()
+    call execute_command_line('stty sane 2>/dev/null')
   end subroutine
 
   subroutine term_shutdown()

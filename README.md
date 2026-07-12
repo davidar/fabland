@@ -52,6 +52,16 @@ US keymap, so anything you can type reaches the client — shells inside
 terminals inside your terminal work fine. `F12` writes a PNG screenshot,
 `F10` (or ctrl-alt-q) quits.
 
+**drm** (`FABLAND_BACKEND=drm`): fabland as an actual display server —
+raw DRM/KMS ioctls (no libdrm): become DRM master, pick a connected
+connector, set a mode, scan out via a dumb buffer, keyboard from the VT.
+Safety: DRM master is exclusive at the kernel level, so it can never steal
+a display another compositor owns, and the auto-scan only accepts *virtual*
+connectors (vkms); driving real hardware requires an explicit
+`FABLAND_DRM_CARD=/dev/dri/cardN`. To try it for real: switch to a spare VT,
+log in, and run it there — your session compositor releases master while
+VT-switched away. F10 gives the display back.
+
 **headless** (`FABLAND_BACKEND=headless`): PNG frames only, written by a
 from-scratch PNG encoder (CRC-32, Adler-32, stored-deflate — also Fortran).
 
@@ -123,6 +133,7 @@ src/fl_libc.f90    libc bindings: sockets, poll, recvmsg/sendmsg + SCM_RIGHTS, m
 src/fl_xkb.f90     XKB keymap generator + ASCII -> evdev bridge
 src/fl_term.f90    terminal backend: half-block renderer, SGR mouse / key parser
 src/fl_nest.f90    nested backend: fabland as a Wayland client
+src/fl_drm.f90     DRM/KMS backend: kernel mode-setting via raw ioctls
 src/fl_png.f90     dependency-free PNG encoder
 src/fabland.f90    wire protocol, object registry, dispatch, WM, policy port, renderer
 examples/tile.awk  master-stack tiling brain (bring your own language)
