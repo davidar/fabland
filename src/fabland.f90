@@ -547,15 +547,16 @@ contains
     if (clients(ci)%ptr_ver >= 5) call emit0(ci, clients(ci)%ptr_id, 5)
   end subroutine
 
-  subroutine ptr_enter(si, sx, sy)
-    integer, intent(in) :: si, sx, sy
-    integer :: ci
+  subroutine ptr_enter(si, px, py)
+    integer, intent(in) :: si, px, py
+    integer :: ci, ox, oy
     ci = surfs(si)%ci
     if (clients(ci)%ptr_id == 0) return
+    call surf_origin(si, ox, oy)
     call mreset()
     call mput_u(next_serial())
     call mput_u(surfs(si)%sid)
-    call mput_u(sx * 256); call mput_u(sy * 256)
+    call mput_u((px - ox) * 256); call mput_u((py - oy) * 256)
     call msend(ci, clients(ci)%ptr_id, 0)
     call ptr_frame(ci)
   end subroutine
@@ -572,14 +573,15 @@ contains
     call ptr_frame(ci)
   end subroutine
 
-  subroutine ptr_motion(si, sx, sy)
-    integer, intent(in) :: si, sx, sy
-    integer :: ci
+  subroutine ptr_motion(si, px, py)
+    integer, intent(in) :: si, px, py
+    integer :: ci, ox, oy
     ci = surfs(si)%ci
     if (clients(ci)%ptr_id == 0) return
+    call surf_origin(si, ox, oy)
     call mreset()
     call mput_u(tms32())
-    call mput_u(sx * 256); call mput_u(sy * 256)
+    call mput_u((px - ox) * 256); call mput_u((py - oy) * 256)
     call msend(ci, clients(ci)%ptr_id, 2)
     call ptr_frame(ci)
   end subroutine
@@ -647,9 +649,40 @@ contains
     end do
   end function
 
+  ! canvas position of surface k's origin (subsurfaces ride their parent)
+  subroutine surf_origin(k, ox, oy)
+    integer, intent(in) :: k
+    integer, intent(out) :: ox, oy
+    integer :: p
+    p = surfs(k)%parent_si
+    if (p > 0) then
+      ox = surfs(p)%x - surfs(p)%gx + surfs(k)%subx
+      oy = surfs(p)%y - surfs(p)%gy + surfs(k)%suby
+    else
+      ox = surfs(k)%x - surfs(k)%gx
+      oy = surfs(k)%y - surfs(k)%gy
+    end if
+  end subroutine
+
+  ! exact surface under the point within window si: a subsurface if the
+  ! point is on one (foot's CSD titlebar needs its own pointer focus to
+  ! request xdg moves), else the main surface
+  function sub_hit(si, px, py) result(k)
+    integer, intent(in) :: si, px, py
+    integer :: k, i, ox, oy
+    k = si
+    do i = 1, size(surfs)
+      if (surfs(i)%used .and. surfs(i)%mapped .and. surfs(i)%parent_si == si) then
+        call surf_origin(i, ox, oy)
+        if (px >= ox .and. px < ox + surfs(i)%w .and. &
+            py >= oy .and. py < oy + surfs(i)%h) k = i
+      end if
+    end do
+  end function
+
   subroutine pointer_moved(px, py)
     integer, intent(in) :: px, py
-    integer :: si
+    integer :: si, tgt
     ptr_x = px
     ptr_y = py
     needs_paint = .true.
@@ -662,16 +695,16 @@ contains
       return
     end if
     si = hit_content(px, py)
-    if (si /= pfocus) then
+    tgt = 0
+    if (si > 0) tgt = sub_hit(si, px, py)
+    if (tgt /= pfocus) then
       if (pfocus > 0) then
         if (surfs(pfocus)%used) call ptr_leave(pfocus)
       end if
-      pfocus = si
-      if (si > 0) call ptr_enter(si, px - surfs(si)%x + surfs(si)%gx, &
-                                     py - surfs(si)%y + surfs(si)%gy)
-    else if (si > 0) then
-      call ptr_motion(si, px - surfs(si)%x + surfs(si)%gx, &
-                          py - surfs(si)%y + surfs(si)%gy)
+      pfocus = tgt
+      if (tgt > 0) call ptr_enter(tgt, px, py)
+    else if (tgt > 0) then
+      call ptr_motion(tgt, px, py)
     end if
   end subroutine
 
@@ -704,14 +737,14 @@ contains
       end if
       return
     end if
-    ! content: forward
+    ! content: forward to the exact surface under the point
     if (si == hit_content(ptr_x, ptr_y)) then
       select case (btn)
       case (0); code = BTN_LEFT
       case (1); code = BTN_MIDDLE
       case default; code = BTN_RIGHT
       end select
-      call ptr_button(si, code, 1)
+      call ptr_button(sub_hit(si, ptr_x, ptr_y), code, 1)
     end if
   end subroutine
 
@@ -1900,8 +1933,9 @@ program fabland
     end if
     do i = 1, inp_hi - inp_lo + 1
       if (iand(int(pfds(inp_lo + i - 1)%revents), int(POLLIN)) /= 0) &
-        call inp_read(i, ptr_x, ptr_y, OUTW, OUTH, evq, nev)
+        call inp_read(i, ptr_x, ptr_y, OUTW, OUTH, evq, nev, now_ms())
     end do
+    if (inp_hi >= inp_lo) call inp_tick(evq, nev, now_ms())
     if (nev > 0) call handle_events(evq, nev)
     call pol_read_commands()
 

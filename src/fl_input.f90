@@ -9,7 +9,7 @@ module fl_input
   use fl_term, only: tev, TK_MOTION, TK_PRESS, TK_RELEASE, TK_WHEEL
   implicit none
   private
-  public :: inp_open_all, inp_count, inp_fd, inp_read, inp_describe
+  public :: inp_open_all, inp_count, inp_fd, inp_read, inp_tick, inp_describe
 
   integer, parameter :: MAXDEV = 8
 
@@ -53,6 +53,11 @@ module fl_input
   integer(8) :: tdown(MAXDEV) = 0
   real :: tmoved(MAXDEV) = 0.0
   real :: frx(MAXDEV) = 0.0, fry(MAXDEV) = 0.0      ! sub-pixel remainders
+  ! tap-and-drag: a tap emits press only; the release is deferred so a
+  ! quick second touch can continue it as a drag (like libinput)
+  logical :: tap_held(MAXDEV) = .false.    ! deferred release pending
+  logical :: tap_drag(MAXDEV) = .false.    ! second touch is dragging
+  integer(8) :: tap_at(MAXDEV) = 0         ! wall-clock ms of the tap
 
 contains
 
@@ -170,10 +175,25 @@ contains
     end if
   end subroutine
 
+  ! Flush deferred tap releases whose drag window has expired.
+  subroutine inp_tick(evq, nev, now)
+    type(tev), intent(inout) :: evq(:)
+    integer, intent(inout) :: nev
+    integer(8), intent(in) :: now
+    integer :: di
+    do di = 1, ndev
+      if (tap_held(di) .and. .not. tap_drag(di) .and. now - tap_at(di) > 280_8) then
+        call put(evq, nev, TK_RELEASE, 0, 0, 0)
+        tap_held(di) = .false.
+      end if
+    end do
+  end subroutine
+
   ! Drain device di, moving the pointer (px, py) and appending tev events.
   ! Motion is flushed before any button so clicks land where they happened.
-  subroutine inp_read(di, px, py, ow, oh, evq, nev)
+  subroutine inp_read(di, px, py, ow, oh, evq, nev, now)
     integer, intent(in) :: di, ow, oh
+    integer(8), intent(in) :: now
     integer, intent(inout) :: px, py, nev
     type(tev), intent(inout) :: evq(:)
     integer(c_int8_t), target :: buf(24 * 64)
@@ -229,6 +249,10 @@ contains
           select case (ecode)
           case (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE)
             call flush_motion(px, py, moved, evq, nev)
+            if (tap_held(di)) then      ! physical click cancels a pending tap
+              call put(evq, nev, TK_RELEASE, 0, px, py)
+              tap_held(di) = .false.; tap_drag(di) = .false.
+            end if
             d = 0                                   ! tev button: 0 L, 1 M, 2 R
             if (ecode == BTN_MIDDLE) d = 1
             if (ecode == BTN_RIGHT) d = 2
@@ -245,13 +269,30 @@ contains
               tdown(di) = tms
               tmoved(di) = 0.0
               frx(di) = 0.0; fry(di) = 0.0
+              if (tap_held(di) .and. now - tap_at(di) <= 280_8) then
+                tap_drag(di) = .true.   ! tap-and-drag: keep the button held
+              else if (tap_held(di)) then
+                call put(evq, nev, TK_RELEASE, 0, px, py)   ! stale tap: click ends
+                tap_held(di) = .false.
+              end if
             else
               touching(di) = .false.
-              ! tap-to-click: short, still contact = left click
-              if (tms - tdown(di) < 220_8 .and. tmoved(di) < 8.0) then
+              if (tap_drag(di)) then
+                ! drag finger lifted: release. If this contact was itself a
+                ! tap, that's a double-tap: release + a second full click.
+                call flush_motion(px, py, moved, evq, nev)
+                call put(evq, nev, TK_RELEASE, 0, px, py)
+                tap_held(di) = .false.; tap_drag(di) = .false.
+                if (tms - tdown(di) < 220_8 .and. tmoved(di) < 8.0) then
+                  call put(evq, nev, TK_PRESS, 0, px, py)
+                  call put(evq, nev, TK_RELEASE, 0, px, py)
+                end if
+              else if (tms - tdown(di) < 220_8 .and. tmoved(di) < 8.0) then
+                ! tap: press now, release deferred (tap-and-drag window)
                 call flush_motion(px, py, moved, evq, nev)
                 call put(evq, nev, TK_PRESS, 0, px, py)
-                call put(evq, nev, TK_RELEASE, 0, px, py)
+                tap_held(di) = .true.
+                tap_at(di) = now
               end if
             end if
           end select

@@ -59,7 +59,7 @@ The desktop is sized to the mode, at an auto-picked integer scale so HiDPI
 panels stay readable (2880×1800 becomes a 1440×900 desktop rendered 2× —
 override with `FABLAND_SCALE=n`). It also has a pointer: mice and touchpads
 read straight from `/dev/input/event*` — `EVIOCGBIT` classification, relative
-and absolute motion, wheel, tap-to-click — no libinput, a mouse is just a
+and absolute motion, wheel, tap-to-click and tap-and-drag — no libinput, a mouse is just a
 stream of 24-byte records if you ask nicely. One-time setup:
 `sudo usermod -aG input $USER` (log out/in). Windows drag by their titlebars,
 server- or client-side.
