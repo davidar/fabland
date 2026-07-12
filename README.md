@@ -37,6 +37,14 @@ decorations with automatic CSD detection (clients that call
 
 ## Backends
 
+**nested** (default when `$WAYLAND_DISPLAY` points at a host compositor):
+fabland runs as a Wayland *client* — the whole desktop is presented as a
+toplevel window on GNOME/weston/anything, with the host's keyboard and
+pointer forwarded into fabland's own seat. Client-side wire protocol,
+shm-over-memfd, xdg-shell handshake: still all Fortran. Yes, this means
+fabland can run nested inside fabland, and yes, a bash prompt three
+compositors deep accepts your keystrokes.
+
 **term** (default on a tty): the compositor renders its output into your
 terminal as truecolor half-block cells and turns raw stdin + xterm SGR mouse
 reporting into `wl_keyboard`/`wl_pointer` events. ASCII is bridged through a
@@ -44,9 +52,44 @@ US keymap, so anything you can type reaches the client — shells inside
 terminals inside your terminal work fine. `F12` writes a PNG screenshot,
 `F10` (or ctrl-alt-q) quits.
 
-**headless** (default otherwise, or `FABLAND_BACKEND=headless`): PNG frames
-only, written by a from-scratch PNG encoder (CRC-32, Adler-32, stored-deflate
-— also Fortran).
+**headless** (`FABLAND_BACKEND=headless`): PNG frames only, written by a
+from-scratch PNG encoder (CRC-32, Adler-32, stored-deflate — also Fortran).
+
+## The policy engine port
+
+Window-management *policy* is data transformation, so fabland externalizes
+it. On every state change it writes a **columnar snapshot** to
+`$XDG_RUNTIME_DIR/fabland-0.state` (a FIFO):
+
+```
+begin 3 1024 640
+id 1 4 9
+x 14 610 610
+y 44 44 350
+w 566 400 400
+h 582 276 276
+focused 1 0 0
+csd 0 1 1
+end
+```
+
+and accepts newline commands on `fabland-0.cmd`:
+`move <id> <x> <y>` · `resize <id> <w> <h>` · `focus <id>` · `close <id>`.
+
+The brain is any process in any language that maps `state → commands`. It
+never sees a pointer, an fd, or a Wayland object — just columns in, verbs
+out. The reference brain is a master-stack tiler **in awk**:
+
+```sh
+awk -f examples/tile.awk \
+  < $XDG_RUNTIME_DIR/fabland-0.state \
+  > $XDG_RUNTIME_DIR/fabland-0.cmd
+```
+
+![awk-driven tiling](demo-tiling.png)
+
+That's three terminal emulators being tiled by an awk script. A BQN brain
+would be right at home here — the snapshot is already structure-of-arrays.
 
 ## Build & run
 
@@ -69,8 +112,8 @@ Environment knobs: `FABLAND_DISPLAY` (socket name), `FABLAND_BACKEND`
 
 ## What it is not
 
-A daily driver. There is no DRM/KMS, no GPU, no damage tracking, no resize,
-no copy-paste. It is, however, a genuine Wayland compositor that genuine
+A daily driver. There is no DRM/KMS, no GPU, no damage tracking, no
+copy-paste. It is, however, a genuine Wayland compositor that genuine
 clients — including two real terminal emulators — are perfectly happy to talk
 to, written in the language of numerical weather prediction and your
 grandfather's linear algebra.
@@ -79,8 +122,10 @@ grandfather's linear algebra.
 src/fl_libc.f90    libc bindings: sockets, poll, recvmsg/sendmsg + SCM_RIGHTS, mmap, memfd
 src/fl_xkb.f90     XKB keymap generator + ASCII -> evdev bridge
 src/fl_term.f90    terminal backend: half-block renderer, SGR mouse / key parser
+src/fl_nest.f90    nested backend: fabland as a Wayland client
 src/fl_png.f90     dependency-free PNG encoder
-src/fabland.f90    wire protocol, object registry, dispatch, WM, renderer
+src/fabland.f90    wire protocol, object registry, dispatch, WM, policy port, renderer
+examples/tile.awk  master-stack tiling brain (bring your own language)
 ```
 
 Written by Claude (Fable 5), from a one-shot challenge by [@davidar](https://github.com/davidar):

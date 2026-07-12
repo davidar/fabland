@@ -81,6 +81,9 @@ module fl_core
     integer :: parent_si = 0        ! nonzero: this is a subsurface
     integer :: subx = 0, suby = 0
     logical :: has_csd = .false.    ! client draws own decorations
+    ! xdg window geometry: visible box within the buffer (shadows excluded).
+    ! x/y above are the on-screen position of THIS box, not the buffer.
+    integer :: gx = 0, gy = 0, gw = 0, gh = 0
   end type
 
   type :: pool_t
@@ -119,10 +122,17 @@ module fl_core
   integer :: pfocus = 0            ! pointer-focused surface index
   integer :: drag_si = 0, drag_dx = 0, drag_dy = 0
   integer :: ptr_x = OUTW/2, ptr_y = OUTH/2
+  integer :: host_mods = 0         ! nested backend: host modifier state
   integer(c_int) :: keymap_fd = -1
   integer :: keymap_sz = 0
   logical :: want_shot = .false.
   logical :: want_quit = .false.
+
+  ! policy engine port: columnar state snapshots out, commands in
+  integer(c_int) :: pol_state_fd = -1, pol_cmd_fd = -1
+  logical :: policy_dirty = .false.
+  character(4096) :: pol_line = ' '
+  integer :: pol_llen = 0
 
   ! outgoing message scratch
   integer(4), target :: mw(1024)
@@ -383,6 +393,7 @@ contains
       if (surfs(i)%used .and. surfs(i)%parent_si == si) surfs(i)%parent_si = 0
     end do
     needs_paint = .true.
+    policy_dirty = .true.
   end subroutine
 
   ! ── registry greetings ────────────────────────────────────────────────
@@ -484,6 +495,14 @@ contains
     call msend(ci, clients(ci)%kbd_id, 4)
   end subroutine
 
+  subroutine kbd_modifiers_full(ci, dep, lat, lock)
+    integer, intent(in) :: ci, dep, lat, lock
+    call mreset()
+    call mput_u(next_serial())
+    call mput_u(dep); call mput_u(lat); call mput_u(lock); call mput_u(0)
+    call msend(ci, clients(ci)%kbd_id, 4)
+  end subroutine
+
   subroutine kbd_key(ci, code, state)
     integer, intent(in) :: ci, code, state
     call mreset()
@@ -503,6 +522,7 @@ contains
     kfocus = si
     if (si > 0) call kbd_enter(si)
     needs_paint = .true.
+    policy_dirty = .true.
   end subroutine
 
   ! deliver one keystroke (press+release with modifiers) to the focus
@@ -598,8 +618,8 @@ contains
     do zi = nz, 1, -1
       s = zlist(zi)
       if (.not. (surfs(s)%used .and. surfs(s)%mapped)) cycle
-      if (x >= surfs(s)%x .and. x < surfs(s)%x + surfs(s)%w .and. &
-          y >= surfs(s)%y .and. y < surfs(s)%y + surfs(s)%h) then
+      if (x >= surfs(s)%x .and. x < surfs(s)%x + surfs(s)%gw .and. &
+          y >= surfs(s)%y .and. y < surfs(s)%y + surfs(s)%gh) then
         si = s
         return
       end if
@@ -616,8 +636,8 @@ contains
       if (.not. (surfs(s)%used .and. surfs(s)%mapped)) cycle
       y0 = surfs(s)%y
       if (.not. surfs(s)%has_csd) y0 = surfs(s)%y - 30
-      if (x >= surfs(s)%x - 2 .and. x < surfs(s)%x + surfs(s)%w + 2 .and. &
-          y >= y0 .and. y < surfs(s)%y + surfs(s)%h + 2) then
+      if (x >= surfs(s)%x - 2 .and. x < surfs(s)%x + surfs(s)%gw + 2 .and. &
+          y >= y0 .and. y < surfs(s)%y + surfs(s)%gh + 2) then
         si = s
         return
       end if
@@ -643,9 +663,11 @@ contains
         if (surfs(pfocus)%used) call ptr_leave(pfocus)
       end if
       pfocus = si
-      if (si > 0) call ptr_enter(si, px - surfs(si)%x, py - surfs(si)%y)
+      if (si > 0) call ptr_enter(si, px - surfs(si)%x + surfs(si)%gx, &
+                                     py - surfs(si)%y + surfs(si)%gy)
     else if (si > 0) then
-      call ptr_motion(si, px - surfs(si)%x, py - surfs(si)%y)
+      call ptr_motion(si, px - surfs(si)%x + surfs(si)%gx, &
+                          py - surfs(si)%y + surfs(si)%gy)
     end if
   end subroutine
 
@@ -737,13 +759,31 @@ contains
       case (TK_MOTION)
         call pointer_moved(evq(i)%a, evq(i)%b)
       case (TK_PRESS)
-        call pointer_press(iand(evq(i)%a, 3), iand(evq(i)%a, 16) /= 0)
+        call pointer_press(iand(evq(i)%a, 3), &
+          iand(evq(i)%a, 16) /= 0 .or. iand(host_mods, 4) /= 0)
       case (TK_RELEASE)
         call pointer_release(iand(evq(i)%a, 3))
       case (TK_WHEEL)
         if (pfocus > 0) then
           if (surfs(pfocus)%used) call ptr_axis(pfocus, evq(i)%a * 2560)
         end if
+      case (TK_RAWKEY)     ! nested: forward host key events verbatim
+        if (kfocus > 0) then
+          if (surfs(kfocus)%used) then
+            if (clients(surfs(kfocus)%ci)%kbd_id /= 0) &
+              call kbd_key(surfs(kfocus)%ci, evq(i)%a, evq(i)%b)
+          end if
+        end if
+      case (TK_RAWMODS)
+        host_mods = evq(i)%a
+        if (kfocus > 0) then
+          if (surfs(kfocus)%used) then
+            if (clients(surfs(kfocus)%ci)%kbd_id /= 0) &
+              call kbd_modifiers_full(surfs(kfocus)%ci, evq(i)%a, evq(i)%b, evq(i)%c)
+          end if
+        end if
+      case (TK_QUIT)
+        want_quit = .true.
       end select
     end do
   end subroutine
@@ -792,6 +832,7 @@ contains
       return
     end if
 
+    if (surfs(si)%w /= bufs(bi)%w .or. surfs(si)%h /= bufs(bi)%h) policy_dirty = .true.
     call c_f_pointer(pools(pi)%mem, p32, [int(pools(pi)%sz / 4)])
     if (allocated(surfs(si)%tex)) deallocate(surfs(si)%tex)
     allocate(surfs(si)%tex(bufs(bi)%w, bufs(bi)%h))
@@ -805,13 +846,19 @@ contains
     end do
     surfs(si)%w = bufs(bi)%w
     surfs(si)%h = bufs(bi)%h
+    if (.not. surfs(si)%has_csd) then
+      surfs(si)%gx = 0
+      surfs(si)%gy = 0
+      surfs(si)%gw = bufs(bi)%w
+      surfs(si)%gh = bufs(bi)%h
+    end if
     first_map = .not. surfs(si)%mapped
     surfs(si)%mapped = .true.
     if (first_map) then
       if (surfs(si)%top_id /= 0) then
         ! keep new windows on screen
-        surfs(si)%x = max(8, min(surfs(si)%x, OUTW - surfs(si)%w - 8))
-        surfs(si)%y = max(34, min(surfs(si)%y, OUTH - surfs(si)%h - 8))
+        surfs(si)%x = max(8, min(surfs(si)%x, OUTW - surfs(si)%gw - 8))
+        surfs(si)%y = max(34, min(surfs(si)%y, OUTH - surfs(si)%gh - 8))
       end if
       call logmsg('mapped surface '//trim(itoa(surfs(si)%sid))//' ('// &
         trim(itoa(surfs(si)%w))//'x'//trim(itoa(surfs(si)%h))//')')
@@ -1089,7 +1136,15 @@ contains
         nid = ru32(ci, ap)
         call add_obj(ci, nid, IF_POPUP, 1, si)
       case (3)   ! set_window_geometry: the client decorates itself
-        if (si > 0) surfs(si)%has_csd = .true.
+        if (si > 0) then
+          surfs(si)%has_csd = .true.
+          if (surfs(si)%gw /= ru32(ci, ap+8) .or. surfs(si)%gh /= ru32(ci, ap+12)) &
+            policy_dirty = .true.
+          surfs(si)%gx = ru32(ci, ap)
+          surfs(si)%gy = ru32(ci, ap+4)
+          surfs(si)%gw = ru32(ci, ap+8)
+          surfs(si)%gh = ru32(ci, ap+12)
+        end if
       case (4)
         if (si > 0) surfs(si)%acked = .true.
       end select
@@ -1340,18 +1395,20 @@ contains
     sx = surfs(si)%x
     sy = surfs(si)%y
     if (.not. surfs(si)%has_csd) then
-      call dim_rect(sx + 8, sy - 28 + 8, sx + surfs(si)%w + 8, sy + surfs(si)%h + 8, 150)
+      call dim_rect(sx + 8, sy - 28 + 8, sx + surfs(si)%gw + 8, sy + surfs(si)%gh + 8, 150)
       border = 7768263          ! #768ac7 unfocused
       if (si == kfocus) border = 12229367   ! #ba9af7 focused
-      call fill_rect(sx - 2, sy - 30, sx + surfs(si)%w + 1, sy + surfs(si)%h + 1, border)
-      call fill_rect(sx, sy - 28, sx + surfs(si)%w - 1, sy - 1, 4211275)
+      call fill_rect(sx - 2, sy - 30, sx + surfs(si)%gw + 1, sy + surfs(si)%gh + 1, border)
+      call fill_rect(sx, sy - 28, sx + surfs(si)%gw - 1, sy - 1, 4211275)
       call draw_dot(sx + 14, sy - 14, 5, 16736087)
       call draw_dot(sx + 32, sy - 14, 5, 16694318)
       call draw_dot(sx + 50, sy - 14, 5, 2672704)
     end if
+    ! buffer origin: geometry box position minus the geometry offset
     do y = 1, surfs(si)%h
       do x = 1, surfs(si)%w
-        call blend_px(sx + x - 1, sy + y - 1, surfs(si)%tex(x, y))
+        call blend_px(sx - surfs(si)%gx + x - 1, sy - surfs(si)%gy + y - 1, &
+                      surfs(si)%tex(x, y))
       end do
     end do
   end subroutine
@@ -1413,8 +1470,9 @@ contains
               integer :: xx, yy
               do yy = 1, surfs(i)%h
                 do xx = 1, surfs(i)%w
-                  call blend_px(surfs(si)%x + surfs(i)%subx + xx - 1, &
-                                surfs(si)%y + surfs(i)%suby + yy - 1, surfs(i)%tex(xx, yy))
+                  call blend_px(surfs(si)%x - surfs(si)%gx + surfs(i)%subx + xx - 1, &
+                                surfs(si)%y - surfs(si)%gy + surfs(i)%suby + yy - 1, &
+                                surfs(i)%tex(xx, yy))
                 end do
               end do
             end block
@@ -1451,6 +1509,130 @@ contains
     end do
   end function
 
+  ! ── policy engine port ────────────────────────────────────────────────
+  ! Snapshot format (one block per state change, columnar):
+  !   begin <nwin> <outw> <outh>
+  !   id 3 7 ...        x ...  y ...  w ...  h ...
+  !   focused 0 1 ...   csd 1 0 ...
+  !   end
+  ! Commands accepted: move <id> <x> <y> | resize <id> <w> <h>
+  !                    focus <id> | close <id>
+
+  subroutine pol_put(s, line, ll)
+    character(*), intent(in) :: s
+    character(*), intent(inout) :: line
+    integer, intent(inout) :: ll
+    line(ll+1:ll+len(s)) = s
+    ll = ll + len(s)
+  end subroutine
+
+  subroutine broadcast_state()
+    character(8192), target :: out
+    character(8192) :: line
+    integer :: ll, zi, si, n
+    integer(c_int8_t), allocatable, target :: raw(:)
+    integer :: i
+    integer(8) :: w
+    if (pol_state_fd < 0) return
+    n = 0
+    do zi = 1, nz
+      if (surfs(zlist(zi))%used .and. surfs(zlist(zi))%mapped) n = n + 1
+    end do
+    ll = 0
+    call pol_put('begin '//trim(itoa(n))//' '//trim(itoa(OUTW))//' '// &
+                 trim(itoa(OUTH))//char(10), line, ll)
+    call pol_col('id', line, ll)
+    call pol_col('x', line, ll)
+    call pol_col('y', line, ll)
+    call pol_col('w', line, ll)
+    call pol_col('h', line, ll)
+    call pol_col('focused', line, ll)
+    call pol_col('csd', line, ll)
+    call pol_put('end'//char(10), line, ll)
+    out = line
+    allocate(raw(ll))
+    do i = 1, ll
+      raw(i) = int(iachar(out(i:i)), 1)
+    end do
+    w = c_write(pol_state_fd, c_loc(raw(1)), int(ll, c_size_t))
+    ! EAGAIN (no brain reading, pipe full) is fine: snapshot dropped
+  end subroutine
+
+  subroutine pol_col(col, line, ll)
+    character(*), intent(in) :: col
+    character(*), intent(inout) :: line
+    integer, intent(inout) :: ll
+    integer :: zi, si, v
+    call pol_put(col, line, ll)
+    do zi = 1, nz
+      si = zlist(zi)
+      if (.not. (surfs(si)%used .and. surfs(si)%mapped)) cycle
+      select case (col)
+      case ('id');      v = si
+      case ('x');       v = surfs(si)%x
+      case ('y');       v = surfs(si)%y
+      case ('w');       v = surfs(si)%gw
+      case ('h');       v = surfs(si)%gh
+      case ('focused'); v = merge(1, 0, si == kfocus)
+      case ('csd');     v = merge(1, 0, surfs(si)%has_csd)
+      end select
+      call pol_put(' '//trim(itoa(v)), line, ll)
+    end do
+    call pol_put(char(10), line, ll)
+  end subroutine
+
+  subroutine pol_command(cmd)
+    character(*), intent(in) :: cmd
+    character(16) :: verb
+    integer :: si, a, b, ios
+    read(cmd, *, iostat=ios) verb, si, a, b
+    if (ios /= 0) then
+      read(cmd, *, iostat=ios) verb, si
+      if (ios /= 0) return
+      a = 0; b = 0
+    end if
+    if (si < 1 .or. si > size(surfs)) return
+    if (.not. (surfs(si)%used .and. surfs(si)%mapped)) return
+    select case (trim(verb))
+    case ('move')
+      surfs(si)%x = a
+      surfs(si)%y = max(0, b)
+      needs_paint = .true.
+    case ('resize')
+      if (surfs(si)%top_id /= 0 .and. a > 0 .and. b > 0) then
+        call mreset()
+        call mput_u(a); call mput_u(b); call mput_u(0)
+        call msend(surfs(si)%ci, surfs(si)%top_id, 0)
+        call emit1(surfs(si)%ci, surfs(si)%xdg_id, 0, next_serial())
+      end if
+    case ('focus')
+      call zraise(si)
+      call set_kfocus(si)
+    case ('close')
+      if (surfs(si)%top_id /= 0) call emit0(surfs(si)%ci, surfs(si)%top_id, 1)
+    end select
+  end subroutine
+
+  subroutine pol_read_commands()
+    integer(c_int8_t), target :: buf(1024)
+    integer(8) :: n
+    integer :: i, ch
+    if (pol_cmd_fd < 0) return
+    n = c_read(pol_cmd_fd, c_loc(buf), 1024_c_size_t)
+    if (n <= 0) return
+    do i = 1, int(n)
+      ch = iand(int(buf(i)), 255)
+      if (ch == 10 .or. ch == 13) then
+        if (pol_llen > 0) call pol_command(pol_line(1:pol_llen))
+        pol_llen = 0
+        pol_line = ' '
+      else if (pol_llen < len(pol_line)) then
+        pol_llen = pol_llen + 1
+        pol_line(pol_llen:pol_llen) = achar(ch)
+      end if
+    end do
+  end subroutine
+
   function focused_title() result(t)
     character(64) :: t
     t = ' '
@@ -1469,19 +1651,21 @@ program fabland
   use fl_png
   use fl_xkb
   use fl_term
+  use fl_nest
   use fl_core
   implicit none
 
-  character(256) :: rtdir, disp, sockpath, envbuf
+  character(256) :: rtdir, disp, sockpath, envbuf, host_disp
   character(200) :: status
-  integer :: st, i, ci, nfds, shot_every, frame_no, shot_no, stdin_slot
+  integer :: st, i, ci, nfds, shot_every, frame_no, shot_no, stdin_slot, nest_slot
   integer(c_int) :: lfd, cfd
-  type(pollfd_t) :: pfds(10)
-  integer :: pmap(10)
+  type(pollfd_t) :: pfds(12)
+  integer :: pmap(12)
   integer(8) :: n, last_paint, last_term, tnow
   character(64) :: shotname
   type(tev) :: evq(128)
   integer :: nev, nwin, zi
+  logical :: nested, pending_present, sock_ok
 
   call get_environment_variable('XDG_RUNTIME_DIR', rtdir, status=st)
   if (st /= 0) rtdir = '/tmp'
@@ -1490,10 +1674,23 @@ program fabland
   call get_environment_variable('FABLAND_DEBUG', envbuf, status=st)
   debug = (st == 0 .and. len_trim(envbuf) > 0)
 
-  ! backend: terminal when stdin+stdout are a tty (or forced)
+  ! backend: nested if a host compositor is reachable, else terminal
+  ! on a tty, else headless. FABLAND_BACKEND=nested|term|headless forces.
+  call get_environment_variable('WAYLAND_DISPLAY', host_disp, status=st)
+  if (st /= 0) host_disp = ' '
+  if (trim(host_disp) == trim(disp)) host_disp = ' '   ! never nest into ourselves
+  sock_ok = .false.
+  if (len_trim(host_disp) > 0) then
+    inquire(file=trim(rtdir)//'/'//trim(host_disp), exist=sock_ok)
+  end if
+  nested = .false.
+  term_mode = .false.
   call get_environment_variable('FABLAND_BACKEND', envbuf, status=st)
   if (st == 0 .and. len_trim(envbuf) > 0) then
+    nested = (trim(envbuf) == 'nested')
     term_mode = (trim(envbuf) == 'term')
+  else if (sock_ok) then
+    nested = .true.
   else
     term_mode = (c_isatty(0_c_int) == 1 .and. c_isatty(1_c_int) == 1)
   end if
@@ -1509,6 +1706,10 @@ program fabland
   call install_signal_handlers()
   call make_keymap_fd(keymap_fd, keymap_sz)
 
+  ! policy engine port (columnar snapshots out, commands in)
+  pol_state_fd = open_fifo_rw(trim(rtdir)//'/'//trim(disp)//'.state')
+  pol_cmd_fd = open_fifo_rw(trim(rtdir)//'/'//trim(disp)//'.cmd')
+
   lfd = make_listen_socket(trim(sockpath))
   if (lfd < 0) then
     call logmsg('FATAL: cannot listen on '//trim(sockpath))
@@ -1520,13 +1721,23 @@ program fabland
     call term_init()
     call term_probe(OUTW, OUTH)
   end if
+  if (nested) then
+    if (.not. nest_connect(trim(rtdir), trim(host_disp), &
+                           'fabland (fortran wayland compositor)')) then
+      nested = .false.
+      call logmsg('nested: could not attach to host '//trim(host_disp)// &
+                  ', falling back to headless')
+    end if
+  end if
 
   call logmsg('+----------------------------------------------+')
   call logmsg('|  fabland -- a Wayland compositor in Fortran  |')
   call logmsg('+----------------------------------------------+')
   call logmsg('listening on '//trim(sockpath))
   call logmsg('output: '//trim(itoa(OUTW))//'x'//trim(itoa(OUTH))//'@60')
-  if (term_mode) then
+  if (nested) then
+    call logmsg('backend: nested (window on host '//trim(host_disp)//')')
+  else if (term_mode) then
     call logmsg('backend: terminal (half-block truecolor)')
   else
     call logmsg('backend: headless (PNG frames in ./shots)')
@@ -1537,9 +1748,11 @@ program fabland
   last_term = 0
   frame_no = 0
   shot_no = 0
+  pending_present = .false.
 
   do   ! ── main event loop ──
     if (quit_flag /= 0 .or. want_quit) exit
+    if (nested .and. nest_dead) exit
 
     nfds = 1
     pfds(1)%fd = lfd
@@ -1547,6 +1760,7 @@ program fabland
     pfds(1)%revents = 0
     pmap(1) = 0
     stdin_slot = 0
+    nest_slot = 0
     if (term_mode) then
       nfds = 2
       pfds(2)%fd = 0
@@ -1554,6 +1768,14 @@ program fabland
       pfds(2)%revents = 0
       pmap(2) = 0
       stdin_slot = 2
+    end if
+    if (nested) then
+      nfds = nfds + 1
+      pfds(nfds)%fd = nest_fd()
+      pfds(nfds)%events = POLLIN
+      pfds(nfds)%revents = 0
+      pmap(nfds) = 0
+      nest_slot = nfds
     end if
     do i = 1, size(clients)
       if (clients(i)%used) then
@@ -1596,7 +1818,13 @@ program fabland
       end if
       call term_tick(evq, nev, now_ms())
     end if
+    if (nest_slot > 0) then
+      if (iand(int(pfds(nest_slot)%revents), int(POLLIN)) /= 0) then
+        call nest_pump(evq, nev)
+      end if
+    end if
     if (nev > 0) call handle_events(evq, nev)
+    call pol_read_commands()
 
     do i = 2, nfds
       ci = pmap(i)
@@ -1633,6 +1861,17 @@ program fabland
         want_shot = .false.
       end if
       frame_no = frame_no + 1
+      if (nested) pending_present = .true.
+    end if
+
+    if (nested .and. pending_present .and. nest_can_present()) then
+      call nest_present(canvas)
+      pending_present = .false.
+    end if
+
+    if (policy_dirty) then
+      call broadcast_state()
+      policy_dirty = .false.
     end if
 
     if (term_mode .and. tnow - last_term >= 66) then

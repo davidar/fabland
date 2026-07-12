@@ -8,7 +8,8 @@ module fl_term
   private
   public :: tev, term_init, term_shutdown, term_probe, term_render, &
             term_read_input, term_tick, &
-            TK_CHAR, TK_SPECIAL, TK_MOTION, TK_PRESS, TK_RELEASE, TK_WHEEL
+            TK_CHAR, TK_SPECIAL, TK_MOTION, TK_PRESS, TK_RELEASE, TK_WHEEL, &
+            TK_RAWKEY, TK_RAWMODS, TK_QUIT
 
   integer, parameter :: TK_CHAR = 1     ! a=byte, b=1 if alt held
   integer, parameter :: TK_SPECIAL = 2  ! a=special id (see SP_*)
@@ -16,6 +17,9 @@ module fl_term
   integer, parameter :: TK_PRESS = 4    ! a=button(0 left,1 middle,2 right), b,c = canvas x,y
   integer, parameter :: TK_RELEASE = 5
   integer, parameter :: TK_WHEEL = 6    ! a = +1 down / -1 up
+  integer, parameter :: TK_RAWKEY = 7   ! a=evdev code, b=state (nested backend)
+  integer, parameter :: TK_RAWMODS = 8  ! a=depressed, b=latched, c=locked
+  integer, parameter :: TK_QUIT = 9     ! host asked us to close
 
   type :: tev
     integer :: k = 0

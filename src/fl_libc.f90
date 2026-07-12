@@ -172,6 +172,31 @@ module fl_libc
       integer(c_int), value :: sig
       type(c_funptr), value :: handler
     end function
+
+    integer(c_int) function c_connect(fd, addr, alen) bind(c, name='connect')
+      import :: c_int, c_ptr
+      integer(c_int), value :: fd
+      type(c_ptr), value :: addr
+      integer(c_int), value :: alen
+    end function
+
+    integer(c_int) function c_ftruncate(fd, length) bind(c, name='ftruncate')
+      import :: c_int, c_long
+      integer(c_int), value :: fd
+      integer(c_long), value :: length
+    end function
+
+    integer(c_int) function c_mkfifo(path, mode) bind(c, name='mkfifo')
+      import :: c_int, c_char
+      character(kind=c_char), intent(in) :: path(*)
+      integer(c_int), value :: mode
+    end function
+
+    integer(c_int) function c_open(path, flags, mode) bind(c, name='open')
+      import :: c_int, c_char
+      character(kind=c_char), intent(in) :: path(*)
+      integer(c_int), value :: flags, mode
+    end function
   end interface
 
 contains
@@ -344,6 +369,61 @@ contains
     end do
     raw(n) = 0_1
     w = c_write(fd, c_loc(raw(1)), int(n, c_size_t))
+  end function
+
+  ! Create (if needed) and open a FIFO read/write + nonblocking.
+  function open_fifo_rw(path) result(fd)
+    character(*), intent(in) :: path
+    integer(c_int) :: fd
+    character(kind=c_char) :: cpath(len_trim(path)+1)
+    integer :: i, st
+    do i = 1, len_trim(path)
+      cpath(i) = path(i:i)
+    end do
+    cpath(len_trim(path)+1) = c_null_char
+    st = c_mkfifo(cpath, int(o'600', c_int))   ! EEXIST is fine
+    fd = c_open(cpath, 2050_c_int, 0_c_int)    ! O_RDWR | O_NONBLOCK
+  end function
+
+  ! Connect to a unix stream socket at `path`.
+  function connect_socket(path) result(fd)
+    character(*), intent(in) :: path
+    integer(c_int) :: fd
+    integer(c_int8_t), target :: sa(110)
+    integer :: i, n, st
+    n = len_trim(path)
+    sa = 0_1
+    sa(1) = int(AF_UNIX, 1)
+    sa(2) = 0_1
+    do i = 1, min(n, 107)
+      sa(2+i) = int(iachar(path(i:i)), 1)
+    end do
+    fd = c_socket(AF_UNIX, SOCK_STREAM, 0_c_int)
+    if (fd < 0) return
+    if (c_connect(fd, c_loc(sa), int(2 + n + 1, c_int)) /= 0) then
+      st = c_close(fd)
+      fd = -1
+    end if
+  end function
+
+  ! Create an anonymous shared-memory file of the given size.
+  function memfd_sized(name, bytes) result(fd)
+    character(*), intent(in) :: name
+    integer, intent(in) :: bytes
+    integer(c_int) :: fd
+    character(kind=c_char) :: cname(len_trim(name)+1)
+    integer :: i, st
+    do i = 1, len_trim(name)
+      cname(i) = name(i:i)
+    end do
+    cname(len_trim(name)+1) = c_null_char
+    fd = c_memfd_create(cname, 1_c_int)   ! MFD_CLOEXEC
+    if (fd < 0) return
+    st = c_ftruncate(fd, int(bytes, c_long))
+    if (st /= 0) then
+      st = c_close(fd)
+      fd = -1
+    end if
   end function
 
   subroutine sig_handler(sig) bind(c)
