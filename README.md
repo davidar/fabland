@@ -55,6 +55,9 @@ terminals inside your terminal work fine. `F12` writes a PNG screenshot,
 **drm** (`FABLAND_BACKEND=drm`): fabland as an actual display server —
 raw DRM/KMS ioctls (no libdrm): become DRM master, pick a connected
 connector, set a mode, scan out via a dumb buffer, keyboard from the VT.
+The desktop is sized to the mode, at an auto-picked integer scale so HiDPI
+panels stay readable (2880×1800 becomes a 1440×900 desktop rendered 2× —
+override with `FABLAND_SCALE=n`).
 Safety: DRM master is exclusive at the kernel level, so it can never steal
 a display another compositor owns, and the auto-scan only accepts *virtual*
 connectors (vkms); driving real hardware requires an explicit

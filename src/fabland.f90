@@ -23,7 +23,7 @@ module fl_core
   use fl_term
   implicit none
 
-  integer, parameter :: OUTW = 1024, OUTH = 640
+  integer :: OUTW = 1024, OUTH = 640   ! desktop size; drm backend resizes to the mode
 
   ! interface ids
   integer, parameter :: IF_DISPLAY = 1, IF_REGISTRY = 2, IF_CALLBACK = 3, &
@@ -121,7 +121,7 @@ module fl_core
   integer :: kfocus = 0            ! keyboard-focused surface index
   integer :: pfocus = 0            ! pointer-focused surface index
   integer :: drag_si = 0, drag_dx = 0, drag_dy = 0
-  integer :: ptr_x = OUTW/2, ptr_y = OUTH/2
+  integer :: ptr_x = 512, ptr_y = 320   ! re-centered once OUTW/OUTH are final
   integer :: host_mods = 0         ! nested backend: host modifier state
   integer(c_int) :: keymap_fd = -1
   integer :: keymap_sz = 0
@@ -1705,7 +1705,6 @@ program fabland
 
   sockpath = trim(rtdir)//'/'//trim(disp)
   call execute_command_line('mkdir -p shots')
-  allocate(canvas(OUTW, OUTH))
   call install_signal_handlers()
   call make_keymap_fd(keymap_fd, keymap_sz)
 
@@ -1730,6 +1729,17 @@ program fabland
     if (st /= 0) envbuf = ' '
     if (drm_open_any(trim(envbuf))) then
       call logmsg('drm: master on '//trim(drm_describe()))
+      ! size the desktop to the mode, at an integer scale so HiDPI panels
+      ! get readable text (2880x1800 -> 1440x900 rendered 2x)
+      call get_environment_variable('FABLAND_SCALE', envbuf, status=st)
+      if (st == 0 .and. len_trim(envbuf) > 0) then
+        read(envbuf, *) drm_scale
+      else
+        drm_scale = min(drm_mode_w / 1280, drm_mode_h / 800)
+      end if
+      drm_scale = max(1, drm_scale)
+      OUTW = drm_mode_w / drm_scale
+      OUTH = drm_mode_h / drm_scale
       if (c_isatty(0_c_int) == 1) then
         raw_stdin = .true.
         open(newunit=logu, file='fabland.log', status='replace', action='write')
@@ -1750,6 +1760,10 @@ program fabland
     end if
   end if
 
+  allocate(canvas(OUTW, OUTH))
+  ptr_x = OUTW / 2
+  ptr_y = OUTH / 2
+
   call logmsg('+----------------------------------------------+')
   call logmsg('|  fabland -- a Wayland compositor in Fortran  |')
   call logmsg('+----------------------------------------------+')
@@ -1761,7 +1775,9 @@ program fabland
     call logmsg('backend: terminal (half-block truecolor)')
   else if (drmmode) then
     call logmsg('backend: drm/kms ('//trim(itoa(drm_mode_w))//'x'// &
-                trim(itoa(drm_mode_h))//' scanout)')
+                trim(itoa(drm_mode_h))//' scanout, desktop '// &
+                trim(itoa(OUTW))//'x'//trim(itoa(OUTH))//' at '// &
+                trim(itoa(drm_scale))//'x)')
   else
     call logmsg('backend: headless (PNG frames in ./shots)')
   end if

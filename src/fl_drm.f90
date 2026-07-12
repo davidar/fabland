@@ -9,7 +9,7 @@ module fl_drm
   implicit none
   private
   public :: drm_open_any, drm_present, drm_ready, drm_mode_w, drm_mode_h, &
-            drm_describe
+            drm_describe, drm_scale
 
   ! ioctl request codes (x86_64, computed from _IO/_IOWR in drm.h)
   integer(c_long), parameter :: IO_SET_MASTER   = int(z'641E', c_long)
@@ -100,6 +100,7 @@ module fl_drm
   logical :: drm_ready = .false.
   integer(c_int) :: dfd = -1
   integer :: drm_mode_w = 0, drm_mode_h = 0
+  integer :: drm_scale = 1     ! integer upscale, canvas pixel -> scale x scale block
   integer :: fb_pitch = 0, fb_id = 0
   type(c_ptr) :: fbmem = c_null_ptr
   character(128) :: descr = ' '
@@ -244,22 +245,25 @@ contains
     ok = .false.
   end function
 
-  ! Copy the canvas into the scanout buffer, centered, then flush.
+  ! Copy the canvas into the scanout buffer — upscaled by drm_scale
+  ! (nearest neighbor), centered — then flush.
   subroutine drm_present(canvas, cw, ch)
     integer, intent(in) :: cw, ch
     integer(4), intent(in) :: canvas(cw, ch)
     integer(4), pointer :: fb(:)
     type(dirty_t), target :: dirty
-    integer :: x, y, ox, oy, row, st, words
+    integer :: x, y, ox, oy, row, st, words, s, sy
     if (.not. drm_ready) return
+    s = max(1, drm_scale)
     words = fb_pitch / 4 * drm_mode_h
     call c_f_pointer(fbmem, fb, [words])
-    ox = max(0, (drm_mode_w - cw) / 2)
-    oy = max(0, (drm_mode_h - ch) / 2)
-    do y = 1, min(ch, drm_mode_h)
+    ox = max(0, (drm_mode_w - cw * s) / 2)
+    oy = max(0, (drm_mode_h - ch * s) / 2)
+    do y = 1, min(ch * s, drm_mode_h)
+      sy = (y - 1) / s + 1
       row = (oy + y - 1) * (fb_pitch / 4)
-      do x = 1, min(cw, drm_mode_w)
-        fb(row + ox + x) = canvas(x, y)
+      do x = 1, min(cw * s, drm_mode_w)
+        fb(row + ox + x) = canvas((x - 1) / s + 1, sy)
       end do
     end do
     dirty%fb_id = fb_id
